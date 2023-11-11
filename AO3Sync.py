@@ -3,6 +3,8 @@ from typing import List
 import AO3T
 import argparse
 import toml
+import os
+import time
 
 
 config = toml.load(f"./config.toml")
@@ -21,9 +23,10 @@ class LibraryBook(object):
 
 def arguments():
     parser = argparse.ArgumentParser("AO3Sync")
-    parser.add_argument('-t', "--test", help="Testing flag", action='store_true')
-    parser.add_argument('-d', '--dryrun', help="Fetch works but don't download", action='store_true')
+    parser.add_argument("--test", help="Testing flag", action='store_true')
+    parser.add_argument('--dryrun', help="Fetch works but don't download", action='store_true')
     parser.add_argument('-a', '--all', help="Check all bookmarks, without this flag only the first page will be checked", action='store_true')
+    parser.add_argument('-d', '--delay', help="Delay in seconds to wait between loading each work. Default is 0", action='store', type=int, default=0)
     return parser.parse_args()
 
 def get_calibre_books() -> List[LibraryBook]:
@@ -90,25 +93,17 @@ def sync_library_and_bookmarks(bookmarks: List[AO3T.Work], library_books: List[L
             if library_book_title == bookmark_work.title:
                 missing_works.remove(bookmark_work)
                 break
-
     return missing_works
 
-def load_works_threaded(works: List[AO3T.Work]):
-    threads = []
-    for work in works:
-        threads.append(work.reload(threaded=True))
-    for thread in threads:
-        thread.join()
-
-def load_works(works: List[AO3T.Work], load_chapters=True):
-    for work in works:
-        work.reload(load_chapters=load_chapters)
-
-def printWorks(works: List[AO3T.Work], collection=False):
-    if (collection):
-        for work in works: print(f'{work.title} - {work.series}')
-    else: 
-        for work in works: print(f'{work.title}')
+def walk(top, maxdepth: int):
+    dirs, nondirs = [], []
+    for name in os.listdir(top):
+        (dirs if os.path.isdir(os.path.join(top, name)) else nondirs).append(name)
+    yield top, dirs, nondirs
+    if maxdepth > 1:
+        for name in dirs:
+            for x in walk(os.path.join(top, name), maxdepth-1):
+                yield x
 
 def main():
     args = arguments()
@@ -116,12 +111,38 @@ def main():
     bookmarks = get_ao3_bookmarks(args.all)
     missing_works = sync_library_and_bookmarks(bookmarks, kavita_books)
     print(f'The following works are bookmarked, but not downloaded:')
-    printWorks(missing_works)
+    for work in missing_works: print(f'{work.title}')
+    print()
     if (not args.dryrun):
-        load_works(missing_works)
+        existing_folders = dict()
+        for (root, dirs, files) in walk(config['download_path'], 2):
+            clean_root = root[len(config['download_path'])+1:]
+            if (clean_root == ""):
+                for dir in dirs:
+                    existing_folders[dir] = dict()
+            else:
+                for dir in dirs:
+                    existing_folders[clean_root][dir] = True
+        print("Done loading existing folders", end="\n\n")
         for work in missing_works:
-            print(f"downloading {work.title}")
-            with open(f"{config['download_path']}/{work.title}.epub", "wb") as file:
+            time.sleep(args.delay)
+            print(f"Loading {work.title}")
+            work.reload()
+            download_path = config['download_path']
+            author = work.authors[0].username
+            download_path += f"/{author}"
+            if (existing_folders.get(author) == None):
+                os.mkdir(download_path)
+                existing_folders[author] = dict()
+            if (work.series):
+                series = work.series[0].name
+                download_path += f"/{series}"
+                if (existing_folders[author].get(series) == None):
+                    os.mkdir(download_path)
+                    existing_folders[author][series] = True
+            print(f"Downloading {work.title}")
+            download_path += f"/{work.title}.epub"
+            with open(download_path, "wb") as file:
                 file.write(work.download("EPUB"))
                 file.close()
 
